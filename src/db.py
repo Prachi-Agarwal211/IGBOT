@@ -132,6 +132,44 @@ def init_db():
             )
             """
         )
+        # audio pools for reels planning
+        c.execute(
+            """
+            CREATE TABLE IF NOT EXISTS audio_pools (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                name TEXT NOT NULL,
+                items_json TEXT NOT NULL,
+                active INTEGER NOT NULL DEFAULT 1,
+                UNIQUE(name)
+            )
+            """
+        )
+        # v2.2: carousel support
+        c.execute(
+            """
+            CREATE TABLE IF NOT EXISTS carousels (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                caption TEXT,
+                created_at_utc TEXT NOT NULL
+            )
+            """
+        )
+        c.execute(
+            """
+            CREATE TABLE IF NOT EXISTS carousel_items (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                carousel_id INTEGER NOT NULL,
+                image_url TEXT NOT NULL,
+                position INTEGER NOT NULL,
+                FOREIGN KEY(carousel_id) REFERENCES carousels(id) ON DELETE CASCADE
+            )
+            """
+        )
+        # schedules: add carousel_id if missing
+        try:
+            c.execute("ALTER TABLE schedules ADD COLUMN carousel_id INTEGER")
+        except sqlite3.OperationalError:
+            pass
         conn.commit()
 
 
@@ -146,6 +184,26 @@ def insert_meme(source: str, source_id: str, title: str, image_url: str) -> bool
             return True
         except sqlite3.IntegrityError:
             return False
+
+
+def create_meme_returning_id(source: str, source_id: str, title: str, image_url: str) -> int:
+    """Create a meme row and return its id. If already exists, return the existing id."""
+    with get_conn() as conn:
+        try:
+            cur = conn.execute(
+                "INSERT INTO memes (source, source_id, title, image_url) VALUES (?, ?, ?, ?)",
+                (source, source_id, title, image_url),
+            )
+            conn.commit()
+            return cur.lastrowid
+        except sqlite3.IntegrityError:
+            row = conn.execute(
+                "SELECT id FROM memes WHERE source = ? AND source_id = ?",
+                (source, source_id),
+            ).fetchone()
+            if not row:
+                raise
+            return row[0]
 
 
 def fetch_memes_by_status(status: str, limit: Optional[int] = None) -> List[Tuple]:
@@ -195,8 +253,9 @@ def fetch_ready_stories(limit: Optional[int] = None) -> List[Tuple[int, str, str
 # schedule querying/updating
 def fetch_unassigned_schedules(kind: str, limit: Optional[int] = None) -> List[Tuple]:
     with get_conn() as conn:
+        column = 'meme_id' if kind in ('meme', 'reel') else ('story_id' if kind == 'story' else 'carousel_id')
         q = "SELECT id FROM schedules WHERE kind = ? AND status = 'queued' AND {} IS NULL ORDER BY scheduled_time_utc ASC".format(
-            'meme_id' if kind == 'meme' else 'story_id'
+            column
         )
         if limit:
             q += " LIMIT ?"
@@ -224,6 +283,15 @@ def assign_schedule_story(schedule_id: int, story_id: int):
         conn.commit()
 
 
+def assign_schedule_carousel(schedule_id: int, carousel_id: int):
+    with get_conn() as conn:
+        conn.execute(
+            "UPDATE schedules SET carousel_id = ? WHERE id = ?",
+            (carousel_id, schedule_id),
+        )
+        conn.commit()
+
+
 # hashtag pool helpers
 def upsert_hashtag_pool(name: str, tags_csv: str, active: int = 1):
     with get_conn() as conn:
@@ -240,6 +308,25 @@ def get_hashtag_pool(name: str) -> Optional[str]:
         return row[0] if row else None
 
 
+# audio pool helpers
+def upsert_audio_pool(name: str, items_json: str, active: int = 1):
+    with get_conn() as conn:
+        conn.execute(
+            "INSERT INTO audio_pools(name, items_json, active) VALUES (?, ?, ?) ON CONFLICT(name) DO UPDATE SET items_json=excluded.items_json, active=excluded.active",
+            (name, items_json, active),
+        )
+        conn.commit()
+
+
+def get_audio_pool(name: str) -> Optional[str]:
+    with get_conn() as conn:
+        row = conn.execute(
+            "SELECT items_json FROM audio_pools WHERE name = ? AND active = 1",
+            (name,),
+        ).fetchone()
+        return row[0] if row else None
+
+
 def get_meme(meme_id: int) -> Optional[Tuple]:
     with get_conn() as conn:
         row = conn.execute(
@@ -247,6 +334,70 @@ def get_meme(meme_id: int) -> Optional[Tuple]:
             (meme_id,),
         ).fetchone()
         return row
+
+
+# Carousel helpers
+def create_carousel_from_memes(meme_ids: List[int], caption: Optional[str]) -> int:
+    """Create a carousel from meme image URLs. Returns carousel_id."""
+    if not meme_ids or len(meme_ids) < 2:
+        raise ValueError("Carousel requires at least 2 meme ids")
+    with get_conn() as conn:
+        now = datetime.utcnow().replace(microsecond=0).isoformat() + "Z"
+        cur = conn.execute(
+            "INSERT INTO carousels(caption, created_at_utc) VALUES(?, ?)",
+            (caption or "", now),
+        )
+        carousel_id = cur.lastrowid
+        # fetch urls preserving given order
+        pos = 0
+        for mid in meme_ids:
+            row = conn.execute("SELECT image_url FROM memes WHERE id = ?", (mid,)).fetchone()
+            if not row or not row[0]:
+                continue
+            pos += 1
+            conn.execute(
+                "INSERT INTO carousel_items(carousel_id, image_url, position) VALUES(?, ?, ?)",
+                (carousel_id, row[0], pos),
+            )
+        conn.commit()
+        if pos < 2:
+            raise RuntimeError("Not enough valid images to build carousel")
+        return carousel_id
+
+
+def get_carousel(carousel_id: int) -> Tuple[str, List[str]]:
+    """Return (caption, image_urls ordered)."""
+    with get_conn() as conn:
+        cap_row = conn.execute("SELECT caption FROM carousels WHERE id = ?", (carousel_id,)).fetchone()
+        if not cap_row:
+            raise RuntimeError("Carousel not found")
+        urls = [r[0] for r in conn.execute(
+            "SELECT image_url FROM carousel_items WHERE carousel_id = ? ORDER BY position ASC",
+            (carousel_id,),
+        ).fetchall()]
+        return cap_row[0] or "", urls
+
+
+def create_carousel_from_urls(image_urls: List[str], caption: Optional[str]) -> int:
+    """Create a carousel given a list of image URLs (2-10). Returns carousel_id."""
+    urls = [u for u in (image_urls or []) if u]
+    if len(urls) < 2:
+        raise ValueError("Carousel requires at least 2 images")
+    urls = urls[:10]
+    with get_conn() as conn:
+        now = datetime.utcnow().replace(microsecond=0).isoformat() + "Z"
+        cur = conn.execute(
+            "INSERT INTO carousels(caption, created_at_utc) VALUES(?, ?)",
+            (caption or "", now),
+        )
+        carousel_id = cur.lastrowid
+        for pos, u in enumerate(urls, start=1):
+            conn.execute(
+                "INSERT INTO carousel_items(carousel_id, image_url, position) VALUES(?, ?, ?)",
+                (carousel_id, u, pos),
+            )
+        conn.commit()
+        return carousel_id
 
 
 def get_caption_variant(meme_id: int, variant_no: int) -> Optional[Tuple[str, str]]:
@@ -273,9 +424,24 @@ def create_schedule(kind: str, planned_time_utc: str, jitter_sec: int, scheduled
         conn.commit()
 
 
+def create_schedule_returning_id(kind: str, planned_time_utc: str, jitter_sec: int, scheduled_time_utc: str,
+                                 meme_id: Optional[int] = None, story_id: Optional[int] = None,
+                                 caption_variant_no: Optional[int] = None, priority: int = 0) -> int:
+    with get_conn() as conn:
+        cur = conn.execute(
+            """
+            INSERT INTO schedules(kind, meme_id, story_id, caption_variant_no, planned_time_utc, jitter_sec, scheduled_time_utc, platform, status, priority)
+            VALUES(?, ?, ?, ?, ?, ?, ?, 'instagram', 'queued', ?)
+            """,
+            (kind, meme_id, story_id, caption_variant_no, planned_time_utc, jitter_sec, scheduled_time_utc, priority),
+        )
+        conn.commit()
+        return cur.lastrowid
+
+
 def fetch_due_schedules(now_iso: str, kind: Optional[str] = None, limit: Optional[int] = None) -> List[Tuple]:
     with get_conn() as conn:
-        base = "SELECT id, kind, meme_id, story_id, caption_variant_no, scheduled_time_utc FROM schedules WHERE status = 'queued' AND scheduled_time_utc <= ?"
+        base = "SELECT id, kind, meme_id, story_id, carousel_id, caption_variant_no, scheduled_time_utc FROM schedules WHERE status = 'queued' AND scheduled_time_utc <= ?"
         params = [now_iso]
         if kind:
             base += " AND kind = ?"

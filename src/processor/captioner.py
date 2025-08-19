@@ -1,6 +1,7 @@
-from typing import Tuple, List
+from typing import Tuple, List, Optional
 import google.generativeai as genai
 from ..config import GEMINI_API_KEY, GEMINI_MODEL
+from .. import db
 
 
 def init_gemini():
@@ -10,7 +11,7 @@ def init_gemini():
     return genai.GenerativeModel(GEMINI_MODEL)
 
 
-def generate_caption_hashtags(title: str, source: str = "reddit") -> Tuple[str, str]:
+def generate_caption_hashtags(title: str, source: str = "reddit", pool_name: Optional[str] = None) -> Tuple[str, str]:
     """Generate a crisp caption and 10-15 Indian trending hashtags.
     Returns (caption, hashtags_string)
     """
@@ -42,10 +43,27 @@ def generate_caption_hashtags(title: str, source: str = "reddit") -> Tuple[str, 
         caption = title[:100]
     if not hashtags:
         hashtags = "#desimemes #indiandank #relatable #hindimemes #meme #trending"
+    # enrich from hashtag pool if provided
+    if pool_name:
+        pool_csv = db.get_hashtag_pool(pool_name)
+        if pool_csv:
+            pool_tags = [t.strip() for t in pool_csv.split(',') if t.strip()]
+            base = [t for t in hashtags.split() if t.startswith('#')]
+            combined = []
+            seen = set()
+            for t in base + [('#' + t.lstrip('#')) for t in pool_tags]:
+                k = t.lower()
+                if not k.startswith('#') or k in seen:
+                    continue
+                seen.add(k)
+                combined.append(t)
+                if len(combined) >= 28:  # leave room for up to 2 manual tags
+                    break
+            hashtags = ' '.join(combined)
     return caption, hashtags
 
 
-def generate_caption_variants(context_text: str, category: str | None = None, variant_count: int = 3) -> List[Tuple[str, str]]:
+def generate_caption_variants(context_text: str, category: str | None = None, variant_count: int = 3, pool_name: Optional[str] = None) -> List[Tuple[str, str]]:
     """Return list of (caption, hashtags) variants. 3–5 recommended.
     context_text: title + OCR text or any enriched context.
     """
@@ -79,7 +97,24 @@ def generate_caption_variants(context_text: str, category: str | None = None, va
             elif line.upper().startswith("HASHTAGS:"):
                 tags = line.split(":", 1)[1].strip()
         if cap:
-            variants.append((cap, tags or "#desimemes #indiandank #relatable"))
+            tags_out = tags or "#desimemes #indiandank #relatable"
+            if pool_name:
+                pool_csv = db.get_hashtag_pool(pool_name)
+                if pool_csv:
+                    pool_tags = [t.strip() for t in pool_csv.split(',') if t.strip()]
+                    base = [t for t in tags_out.split() if t.startswith('#')]
+                    combined = []
+                    seen = set()
+                    for t in base + [('#' + t.lstrip('#')) for t in pool_tags]:
+                        k = t.lower()
+                        if not k.startswith('#') or k in seen:
+                            continue
+                        seen.add(k)
+                        combined.append(t)
+                        if len(combined) >= 28:
+                            break
+                    tags_out = ' '.join(combined)
+            variants.append((cap, tags_out))
     if not variants:
         variants.append((context_text[:100], "#desimemes #indiandank #relatable"))
     return variants

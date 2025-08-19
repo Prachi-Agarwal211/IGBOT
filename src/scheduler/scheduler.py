@@ -6,9 +6,16 @@ from .. import db
 
 IST = pytz.timezone(TIMEZONE)
 
+# Indian audience peak windows (IST):
+#  - Morning: 07:00–09:00
+#  - Lunch:   12:00–14:00
+#  - Evening: 18:00–21:00
+#  - Late:    22:30–23:59
 WINDOWS = [
-    (time(11, 0), time(14, 0)),
+    (time(7, 0), time(9, 0)),
+    (time(12, 0), time(14, 0)),
     (time(18, 0), time(21, 0)),
+    (time(22, 30), time(23, 59)),
 ]
 
 
@@ -35,14 +42,26 @@ def next_best_slot(now: datetime | None = None) -> datetime:
 
 # v2.1 daily planner with jitter and window weighting
 def _weights_for_minute(minute_of_day: int) -> float:
-    # Heavier weights in 11:00–13:00 and 18:00–22:00 IST
+    """Bias sampling towards Indian peak windows with soft weights.
+    Windows: 07–09, 12–14, 18–21, 22:30–24:00 IST.
+    """
     hour = minute_of_day // 60
-    if 11 <= hour < 13:
+    minute = minute_of_day % 60
+    # Morning 07:00–09:00
+    if 7 <= hour < 9:
         return 2.0
-    if 18 <= hour < 22:
-        return 2.5
+    # Lunch 12:00–14:00
+    if 12 <= hour < 14:
+        return 2.2
+    # Evening 18:00–21:00
+    if 18 <= hour < 21:
+        return 2.6
+    # Late 22:30–24:00
+    if (hour == 22 and minute >= 30) or (hour == 23):
+        return 1.8
+    # Night owls 00–05
     if 0 <= hour < 5:
-        return 1.2  # night owls
+        return 1.2
     return 1.0
 
 
@@ -103,6 +122,21 @@ def plan_day(count_memes: int = 24, count_stories: int = 48, variant_picker=None
                            meme_id=None, story_id=None, caption_variant_no=None, priority=0)
 
 
+def plan_reels_day(count_reels: int = 3, base_every_min: int = 360, jitter_min: int = 12):
+    """Create 'reel' schedules for the current IST day using weighted windows and jitter.
+    Defaults to ~every 6 hours with +/- 12 min jitter, biased to peak windows.
+    """
+    if count_reels <= 0:
+        return
+    now_ist = datetime.now(IST)
+    reel_slots = plan_randomized_slots_ist(now_ist, count_reels, base_every_min=base_every_min, jitter_min=jitter_min)
+    for s in reel_slots:
+        planned_iso = to_utc_iso_z(s)
+        scheduled_iso = to_utc_iso_z(s)
+        db.create_schedule(kind='reel', planned_time_utc=planned_iso, jitter_sec=0, scheduled_time_utc=scheduled_iso,
+                           meme_id=None, story_id=None, caption_variant_no=None, priority=0)
+
+
 def assign_memes_to_open_slots(meme_ids: list[int]):
     """Bind available meme_ids to the earliest unassigned meme schedules for today onward."""
     now_iso = to_utc_iso_z(datetime.now(IST))
@@ -125,7 +159,7 @@ def _times_to_datetimes(day_ist: datetime, times: list[time]) -> list[datetime]:
     return [IST.localize(datetime.combine(day_ist.date(), t)) for t in times]
 
 
-def plan_week(days: int = 7, meme_jitter_min: int = 15, story_jitter_min: int = 7):
+def plan_week(days: int = 7, meme_jitter_min: int = 15, story_jitter_min: int = 7, reel_jitter_min: int = 12):
     """Create 7-day schedule using fixed target times and jitter.
     Memes/day: 12 targets; Stories/day: every 30m from 10:00 to 21:30 (24 slots).
     """
@@ -135,6 +169,8 @@ def plan_week(days: int = 7, meme_jitter_min: int = 15, story_jitter_min: int = 
         time(19, 10), time(20, 0), time(20, 50), time(21, 40), time(22, 20),
         time(23, 45),
     ]
+    # Reels approx 3/day around peaks
+    reel_times = [time(12, 30), time(19, 45), time(21, 15)]
     # Stories every 30 minutes 10:00–21:30
     base_story_times = [time(h, m) for h in range(10, 22) for m in (0, 30)] + [time(21, 30)]
 
@@ -149,6 +185,15 @@ def plan_week(days: int = 7, meme_jitter_min: int = 15, story_jitter_min: int = 
             planned_iso = to_utc_iso_z(base_dt)
             scheduled_iso = to_utc_iso_z(slot)
             db.create_schedule(kind='meme', planned_time_utc=planned_iso, jitter_sec=jitter*60, scheduled_time_utc=scheduled_iso)
+        # Reels with jitter
+        for t in reel_times:
+            base_dt = IST.localize(datetime.combine(day.date(), t))
+            jitter = random.randint(-reel_jitter_min, reel_jitter_min)
+            slot = base_dt + timedelta(minutes=jitter)
+            planned_iso = to_utc_iso_z(base_dt)
+            scheduled_iso = to_utc_iso_z(slot)
+            db.create_schedule(kind='reel', planned_time_utc=planned_iso, jitter_sec=jitter*60, scheduled_time_utc=scheduled_iso)
+
         # Stories with jitter
         for t in base_story_times:
             base_dt = IST.localize(datetime.combine(day.date(), t))

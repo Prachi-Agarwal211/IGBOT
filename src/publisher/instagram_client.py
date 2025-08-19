@@ -138,3 +138,15 @@ class InstagramClient:
             if values:
                 out[name] = values[0].get("value")
         return out
+
+    # Comments (first-comment automation)
+    def create_comment(self, media_id: str, message: str) -> str:
+        """Create a comment on a published media. Returns the comment id."""
+        url = f"{GRAPH_BASE}/{media_id}/comments"
+        payload = {
+            "message": message,
+            "access_token": self.token,
+        }
+        r = requests.post(url, data=payload, timeout=60)
+        r.raise_for_status()
+        return r.json().get("id", "")
