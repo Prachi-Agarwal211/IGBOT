@@ -1,7 +1,6 @@
 import argparse
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 from typing import List
-from datetime import timedelta
 import pytz
 import time
 import json
@@ -131,7 +130,7 @@ def cmd_schedule(per_posts: int):
 
 def cmd_post_due(max_posts: int | None = None):
     db.init_db()
-    now_iso = datetime.utcnow().isoformat() + "Z"
+    now_iso = datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
     due = db.fetch_due_memes(now_iso, limit=max_posts)
     if not due:
         print("No posts due.")
@@ -166,7 +165,7 @@ def cmd_plan_day(memes: int, stories: int, reels: int):
 def cmd_post_due_all(max_items: int | None = None):
     """Process unified schedules (memes + stories). Stories are stubbed for now."""
     db.init_db()
-    now_iso = datetime.utcnow().replace(microsecond=0).isoformat() + "Z"
+    now_iso = datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
     rows = db.fetch_due_schedules(now_iso=now_iso, kind=None, limit=max_items)
     if not rows:
         print("No schedules due.")

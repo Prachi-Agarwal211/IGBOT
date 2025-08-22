@@ -14,3 +14,4 @@ opencv-python==4.10.0.84
 ffmpeg-python==0.2.0
 yt-dlp==2024.08.06
 boto3==1.34.162
+instagrapi @ git+https://github.com/adw0rd/instagrapi.git

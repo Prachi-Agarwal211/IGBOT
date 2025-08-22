@@ -28,3 +28,12 @@ TESSERACT_CMD = os.getenv("TESSERACT_CMD", "")  # Optional: path to tesseract.ex
 # OCR_PROVIDER can be: "local" (default, uses Tesseract) or "ocrspace" (uses OCR.Space API)
 OCR_PROVIDER = os.getenv("OCR_PROVIDER", "local").strip().lower()
 OCRSPACE_API_KEY = os.getenv("OCRSPACE_API_KEY", "")
+
+# instagrapi (username/password) client configuration
+INSTAGRAM_USERNAME = os.getenv("INSTAGRAM_USERNAME", "")
+INSTAGRAM_PASSWORD = os.getenv("INSTAGRAM_PASSWORD", "")
+# Where to store/reuse instagrapi session settings
+INSTAGRAM_SESSION_FILE = os.getenv(
+    "INSTAGRAM_SESSION_FILE",
+    os.path.join(os.path.dirname(os.path.dirname(__file__)), ".instagrapi_session.json"),
+)
