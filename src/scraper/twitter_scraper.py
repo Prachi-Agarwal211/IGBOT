@@ -1,6 +1,8 @@
 from typing import List
 import os
 import tweepy
+from PIL import Image
+import io
 from ..config import TWITTER_BEARER_TOKEN
 from .. import db
 

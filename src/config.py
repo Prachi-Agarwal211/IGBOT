@@ -23,3 +23,8 @@ TIMEZONE = "Asia/Kolkata"
 # v2 additions
 TWITTER_BEARER_TOKEN = os.getenv("TWITTER_BEARER_TOKEN", "")
 TESSERACT_CMD = os.getenv("TESSERACT_CMD", "")  # Optional: path to tesseract.exe on Windows
+
+# OCR provider configuration
+# OCR_PROVIDER can be: "local" (default, uses Tesseract) or "ocrspace" (uses OCR.Space API)
+OCR_PROVIDER = os.getenv("OCR_PROVIDER", "local").strip().lower()
+OCRSPACE_API_KEY = os.getenv("OCRSPACE_API_KEY", "")
